@@ -137,6 +137,7 @@ call remote#host#RegisterPlugin('nvim-go', '0', [
 \ {'type': 'command', 'name': 'GoBuffers', 'sync': 1, 'opts': {}},
 \ {'type': 'command', 'name': 'GoByteOffset', 'sync': 1, 'opts': {'eval': 'expand(''%:p'')', 'range': '%'}},
 \ {'type': 'command', 'name': 'GoCover', 'sync': 0, 'opts': {'eval': '[getcwd(), expand(''%:p'')]'}},
+\ {'type': 'command', 'name': 'GoGenerateDoc', 'sync': 0, 'opts': {'eval': 'expand(''%:p'')'}},
 \ {'type': 'command', 'name': 'GoGenerateTest', 'sync': 0, 'opts': {'addr': 'line', 'bang': '', 'complete': 'file', 'eval': 'expand(''%:p:h'')', 'nargs': '*', 'range': '%'}},
 \ {'type': 'command', 'name': 'GoIferr', 'sync': 0, 'opts': {'eval': 'expand(''%:p'')'}},
 \ {'type': 'command', 'name': 'GoSwitchTest', 'sync': 0, 'opts': {'eval': '[getcwd(), expand(''%:p''), line2byte(line(''.'')) + (col(''.'')-2)]'}},

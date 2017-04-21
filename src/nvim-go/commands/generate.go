@@ -6,7 +6,13 @@ package commands
 
 import (
 	"bufio"
+	"bytes"
 	"fmt"
+	"go/ast"
+	"go/format"
+	"go/parser"
+	"go/token"
+	"log"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -17,8 +23,10 @@ import (
 	"nvim-go/nvimutil"
 
 	"github.com/cweill/gotests/gotests/process"
+	"github.com/davecgh/go-spew/spew"
 	"github.com/neovim/go-client/nvim"
 	"github.com/pkg/errors"
+	"golang.org/x/tools/go/ast/astutil"
 )
 
 var generateFuncRe = regexp.MustCompile(`(?m)^func\s(?:\(\w\s[[:graph:]]+\)\s)?([\w]+)\(`)
@@ -123,4 +131,66 @@ func (c *Commands) GenerateTest(args []string, ranges [2]int, bang bool, dir str
 	}
 
 	return nil
+}
+
+type generateDocEval struct {
+	File string `msgpack:",array"`
+}
+
+func (c *Commands) cmdGenerateDoc(filename string) {
+	go c.GenerateDoc(filename)
+}
+
+// GenerateDoc generates the godoc comment.
+func (c *Commands) GenerateDoc(filename string) error {
+	defer nvimutil.Profile(time.Now(), "GenerateDoc")
+
+	b := nvim.Buffer(c.ctx.BufNr)
+	w := nvim.Window(c.ctx.WinID)
+
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, filename, nil, parser.ParseComments)
+	if err != nil {
+		return nvimutil.ErrorWrap(c.Nvim, err)
+	}
+	offset, err := nvimutil.ByteOffset(c.Nvim, b, w)
+	if err != nil {
+		return nvimutil.ErrorWrap(c.Nvim, errors.WithStack(err))
+	}
+	nodes, _ := astutil.PathEnclosingInterval(f, token.Pos(offset), token.Pos(offset))
+
+	var fnDecl *ast.FuncDecl
+	for _, n := range nodes {
+		if d, ok := n.(*ast.FuncDecl); ok {
+			fnDecl = d
+			break
+		}
+	}
+
+	// if fnDecl.Doc != nil {
+	// 	err := errors.New("already have godoc comments")
+	// 	return nvimutil.ErrorWrap(c.Nvim, err)
+	// }
+
+	for i, decl := range f.Decls {
+		if d, ok := decl.(*ast.FuncDecl); ok && d == fnDecl {
+			// log.Printf("f.Decls[i]: %T => %+v\n", f.Decls[i].(*ast.FuncDecl).Doc.List[0], f.Decls[i].(*ast.FuncDecl).Doc.List[0])
+			f.Decls[i].(*ast.FuncDecl).Doc = &ast.CommentGroup{
+				List: []*ast.Comment{
+					&ast.Comment{
+						Slash: fnDecl.Type.Pos(),
+						Text:  "// " + fnDecl.Name.Name + " \n",
+					},
+				},
+			}
+			log.Printf("f.Decls[i]: %T => %+v\n", f.Decls[i].(*ast.FuncDecl).Doc.List[0], f.Decls[i].(*ast.FuncDecl).Doc.List[0])
+		}
+	}
+	var buf bytes.Buffer
+	log.Printf("f.Comments:\n%+v\n", spew.Sdump(f.Comments))
+	if err := format.Node(&buf, fset, f); err != nil {
+		return nvimutil.ErrorWrap(c.Nvim, errors.WithStack(err))
+	}
+
+	return c.Nvim.SetBufferLines(b, 0, -1, true, nvimutil.ToBufferLines(buf.Bytes()))
 }
