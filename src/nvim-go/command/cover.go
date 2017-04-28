@@ -32,7 +32,7 @@ type cmdCoverEval struct {
 
 func (c *Command) cmdCover(eval *cmdCoverEval) {
 	go func() {
-		err := c.cover(eval)
+		err := c.Cover(eval)
 
 		switch e := err.(type) {
 		case error:
@@ -50,9 +50,9 @@ func (c *Command) cmdCover(eval *cmdCoverEval) {
 	}()
 }
 
-// cover run the go tool cover command and highlight current buffer based cover
+// Cover run the go tool cover command and highlight current buffer based cover
 // profile result.
-func (c *Command) cover(eval *cmdCoverEval) interface{} {
+func (c *Command) Cover(eval *cmdCoverEval) interface{} {
 	defer nvimutil.Profile(time.Now(), "GoCover")
 
 	coverFile, err := ioutil.TempFile(os.TempDir(), "nvim-go-cover")

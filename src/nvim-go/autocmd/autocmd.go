@@ -5,6 +5,7 @@
 package autocmd
 
 import (
+	"context"
 	"sync"
 
 	"nvim-go/command"
@@ -29,6 +30,8 @@ type Autocmd struct {
 	errs *syncmap.Map
 }
 
+var autocmdContext context.Context
+
 // Register register autocmd to nvim.
 func Register(p *plugin.Plugin, ctx *ctx.Context, cmd *command.Command) {
 	autocmd := &Autocmd{
@@ -39,9 +42,10 @@ func Register(p *plugin.Plugin, ctx *ctx.Context, cmd *command.Command) {
 		bufWritePostChan: make(chan error),
 		errs:             new(syncmap.Map),
 	}
+	autocmdContext = context.Background()
 
 	p.HandleAutocmd(&plugin.AutocmdOptions{Event: "BufEnter", Pattern: "*.go", Group: "nvim-go", Eval: "*"}, autocmd.BufEnter)
-	p.HandleAutocmd(&plugin.AutocmdOptions{Event: "BufWritePost", Pattern: "*.go", Group: "nvim-go", Eval: "[getcwd(), expand('%:p')]"}, autocmd.BufWritePost)
-	p.HandleAutocmd(&plugin.AutocmdOptions{Event: "BufWritePre", Pattern: "*.go", Group: "nvim-go", Eval: "[getcwd(), expand('%:p')]"}, autocmd.BufWritePre)
+	p.HandleAutocmd(&plugin.AutocmdOptions{Event: "BufWritePost", Pattern: "*.go", Group: "nvim-go", Eval: "[getcwd(), expand('%:p')]"}, autocmd.bufWritePost)
+	p.HandleAutocmd(&plugin.AutocmdOptions{Event: "BufWritePre", Pattern: "*.go", Group: "nvim-go", Eval: "[getcwd(), expand('%:p')]"}, autocmd.bufWritePre)
 	p.HandleAutocmd(&plugin.AutocmdOptions{Event: "VimEnter", Pattern: "*.go", Group: "nvim-go", Eval: "*"}, autocmd.VimEnter)
 }

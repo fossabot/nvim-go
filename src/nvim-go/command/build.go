@@ -6,6 +6,7 @@ package command
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -13,9 +14,9 @@ import (
 	"time"
 
 	"nvim-go/config"
+	"nvim-go/internal/log"
 	"nvim-go/nvimutil"
 
-	"github.com/neovim/go-client/nvim"
 	"github.com/pkg/errors"
 )
 
@@ -26,58 +27,61 @@ type CmdBuildEval struct {
 }
 
 func (c *Command) cmdBuild(bang bool, eval *CmdBuildEval) {
-	go func() {
-		c.errs.Delete("Build")
+	ctx, cancel := context.WithCancel(cmdContext)
+	c.TryCancel("Build", cancel)
 
-		err := c.Build(bang, eval)
-		switch e := err.(type) {
-		case error:
-			nvimutil.ErrorWrap(c.Nvim, e)
-		case []*nvim.QuickfixError:
-			c.errs.Store("Build", e)
-			errlist := make(map[string][]*nvim.QuickfixError)
-			c.errs.Range(func(ki, vi interface{}) bool {
-				k, v := ki.(string), vi.([]*nvim.QuickfixError)
-				errlist[k] = append(errlist[k], v...)
-				return true
-			})
-			nvimutil.ErrorList(c.Nvim, errlist, true)
-		}
-	}()
+	c.errs.Delete("Build")
+	res := c.Build(ctx, config.BuildForce, eval)
+	c.HandleError("Build", res)
 }
 
 // Build builds the current buffers package use compile tool that determined
 // from the package directory structure.
-func (c *Command) Build(bang bool, eval *CmdBuildEval) interface{} {
+func (c *Command) Build(ctx context.Context, bang bool, eval *CmdBuildEval) interface{} {
 	defer nvimutil.Profile(time.Now(), "GoBuild")
 
-	if !bang {
-		bang = config.BuildForce
-	}
-
-	cmd, err := c.compileCmd(bang, filepath.Dir(eval.File))
-	if err != nil {
-		return errors.WithStack(err)
-	}
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-
-	if buildErr := cmd.Run(); buildErr != nil {
-		if buildErr.(*exec.ExitError) != nil {
-			errlist, err := nvimutil.ParseError(stderr.Bytes(), eval.Cwd, &c.ctx.Build, nil)
-			if err != nil {
-				return errors.WithStack(err)
-			}
-			return errlist
+	errch := make(chan interface{}, 1)
+	go func() {
+		if !bang {
+			bang = config.BuildForce
 		}
-		return errors.WithStack(buildErr)
-	}
 
-	return nvimutil.EchoSuccess(c.Nvim, "GoBuild", fmt.Sprintf("compiler: %s", c.ctx.Build.Tool))
+		cmd, err := c.compileCmd(ctx, bang, filepath.Dir(eval.File))
+		if err != nil {
+			errch <- errors.WithStack(err)
+		}
+		var stderr bytes.Buffer
+		cmd.Stderr = &stderr
+
+		if buildErr := cmd.Run(); buildErr != nil {
+			if _, ok := buildErr.(*exec.ExitError); ok {
+				errlist, err := nvimutil.ParseError(stderr.Bytes(), eval.Cwd, &c.ctx.Build, nil)
+				if err != nil {
+					errch <- errors.WithStack(err)
+				}
+				errch <- errlist
+			}
+			errch <- errors.WithStack(buildErr)
+		}
+		errch <- nil
+	}()
+
+	select {
+	case res := <-errch:
+		if res != nil {
+			return res
+		}
+		log.Debug("success")
+		return nvimutil.EchoSuccess(c.Nvim, "GoBuild", fmt.Sprintf("compiler: %s", c.ctx.Build.Tool))
+	case <-ctx.Done():
+		log.Debug("cancel")
+		<-errch
+		return nil
+	}
 }
 
 // compileCmd returns the *exec.Cmd corresponding to the compile tool.
-func (c *Command) compileCmd(bang bool, dir string) (*exec.Cmd, error) {
+func (c *Command) compileCmd(ctx context.Context, bang bool, dir string) (*exec.Cmd, error) {
 	bin, err := exec.LookPath(c.ctx.Build.Tool)
 	if err != nil {
 		return nil, errors.WithStack(err)
@@ -88,7 +92,7 @@ func (c *Command) compileCmd(bang bool, dir string) (*exec.Cmd, error) {
 		args = append(args, config.BuildFlags...)
 	}
 
-	cmd := exec.Command(bin, "build")
+	cmd := exec.CommandContext(ctx, bin, "build")
 	cmd.Dir = dir
 
 	switch c.ctx.Build.Tool {

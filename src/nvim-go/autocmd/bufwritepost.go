@@ -5,6 +5,8 @@
 package autocmd
 
 import (
+	"context"
+
 	"nvim-go/command"
 	"nvim-go/config"
 	"nvim-go/nvimutil"
@@ -18,38 +20,25 @@ type bufWritePostEval struct {
 	File string
 }
 
-// BufWritePost run the 'autosave' commands on BufWritePost autocmd.
-func (a *Autocmd) BufWritePost(eval *bufWritePostEval) {
-	go a.bufWritePost(eval)
+func (a *Autocmd) bufWritePost(eval *bufWritePostEval) {
+	ctx, cancel := context.WithCancel(autocmdContext)
+	a.cmd.TryCancel("BufWritePost", cancel)
+	res := a.BufWritePost(ctx, eval)
+	a.cmd.HandleError("BufWritePost", res)
 }
 
-func (a *Autocmd) bufWritePost(eval *bufWritePostEval) error {
+// BufWritePost run the 'autosave' commands on BufWritePost autocmd.
+func (a *Autocmd) BufWritePost(ctx context.Context, eval *bufWritePostEval) interface{} {
 	dir := filepath.Dir(eval.File)
 
-	if config.FmtAutosave {
-		err := <-a.bufWritePreChan
-		switch e := err.(type) {
-		case error:
-			return nvimutil.ErrorWrap(a.Nvim, e)
-		case []*nvim.QuickfixError:
-			errlist := make(map[string][]*nvim.QuickfixError)
-			errlist["Fmt"] = e
-			return nvimutil.ErrorList(a.Nvim, errlist, true)
-		}
-	}
-
 	if config.BuildAutosave {
-		err := a.cmd.Build(config.BuildForce, &command.CmdBuildEval{
+		a.errs.Delete("Build")
+		res := a.cmd.Build(ctx, config.BuildForce, &command.CmdBuildEval{
 			Cwd:  eval.Cwd,
 			File: eval.File,
 		})
-		switch e := err.(type) {
-		case error:
-			return nvimutil.ErrorWrap(a.Nvim, e)
-		case []*nvim.QuickfixError:
-			errlist := make(map[string][]*nvim.QuickfixError)
-			errlist["Build"] = e
-			return nvimutil.ErrorList(a.Nvim, errlist, true)
+		if res != nil {
+			return res
 		}
 	}
 
@@ -59,12 +48,9 @@ func (a *Autocmd) bufWritePost(eval *bufWritePostEval) error {
 			defer a.wg.Done()
 
 			a.errs.Delete("Lint")
-			errlist, err := a.cmd.Lint(nil, eval.File)
-			if err != nil {
-				nvimutil.ErrorWrap(a.Nvim, err)
-				return
+			if res := a.cmd.Lint(ctx, nil, eval.File); res != nil {
+				a.errs.Store("Lint", res)
 			}
-			a.errs.Store("Lint", errlist)
 		}()
 	}
 

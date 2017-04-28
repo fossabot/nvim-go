@@ -5,6 +5,8 @@
 package command
 
 import (
+	"context"
+	"fmt"
 	"go/build"
 	"io/ioutil"
 	"os"
@@ -16,6 +18,7 @@ import (
 	"time"
 
 	"nvim-go/config"
+	"nvim-go/internal/log"
 	"nvim-go/internal/pathutil"
 	"nvim-go/nvimutil"
 
@@ -25,17 +28,12 @@ import (
 )
 
 func (c *Command) cmdLint(v *nvim.Nvim, args []string, file string) {
-	// Cleanup error list
-	delete(c.ctx.Errlist, "Lint")
+	ctx, cancel := context.WithCancel(cmdContext)
+	c.TryCancel("Lint", cancel)
 
-	go func() {
-		errlist, err := c.Lint(args, file)
-		if err != nil {
-			nvimutil.ErrorWrap(c.Nvim, err)
-		}
-		c.ctx.Errlist["Lint"] = errlist
-		nvimutil.ErrorList(c.Nvim, c.ctx.Errlist, true)
-	}()
+	c.errs.Delete("Lint")
+	res := c.Lint(ctx, args, file)
+	c.HandleError("Lint", res)
 }
 
 type lintMode string
@@ -47,60 +45,80 @@ const (
 
 // Lint lints a go source file. The argument is a filename or directory path.
 // TODO(zchee): Support go packages.
-func (c *Command) Lint(args []string, file string) ([]*nvim.QuickfixError, error) {
+func (c *Command) Lint(ctx context.Context, args []string, file string) interface{} {
 	defer nvimutil.Profile(time.Now(), "GoLint")
 
-	var (
-		errlist []*nvim.QuickfixError
-		err     error
-	)
-	switch {
-	case len(args) == 0:
-		switch lintMode(config.GolintMode) {
-		case current:
-			errlist, err = c.lintDir(filepath.Dir(file))
-		case root:
-			var rootDir string
-			switch c.ctx.Build.Tool {
-			case "go":
-				root, err := pathutil.PackageID(c.ctx.Build.ProjectRoot)
-				if err != nil {
-					return nil, errors.WithStack(err)
-				}
-				rootDir = root
-			case "gb":
-				rootDir = filepath.Base(c.ctx.Build.ProjectRoot)
-			}
-			for _, pkgname := range importPaths([]string{rootDir + "/..."}) {
-				errors, err := c.lintPackage(pkgname)
-				if err != nil {
-					return nil, err
-				}
-				errlist = append(errlist, errors...)
-			}
-		}
-
-	case len(args) == 1:
-		path := args[0]
-		if path == "%" {
-			path = file
-		}
+	errch := make(chan interface{}, 1)
+	go func() {
+		var (
+			errlist []*nvim.QuickfixError
+			err     error
+		)
 		switch {
-		case pathutil.IsDir(path):
-			errlist, err = c.lintDir(path)
-		case pathutil.IsExist(path):
-			errlist, err = c.lintFiles(path)
-		case !pathutil.IsDir(path) || !pathutil.IsExist(path):
-			for _, pkgname := range importPaths(args) {
-				errlist, err = c.lintPackage(pkgname)
+		case len(args) == 0:
+			switch lintMode(config.GolintMode) {
+			case current:
+				errlist, err = c.lintDir(filepath.Dir(file))
+				if err != nil {
+					errch <- errors.WithStack(err)
+				}
+			case root:
+				var rootDir string
+				switch c.ctx.Build.Tool {
+				case "go":
+					root, err := pathutil.PackageID(c.ctx.Build.ProjectRoot)
+					if err != nil {
+						errch <- errors.WithStack(err)
+					}
+					rootDir = root
+				case "gb":
+					rootDir = filepath.Base(c.ctx.Build.ProjectRoot)
+				}
+				for _, pkgname := range importPaths([]string{rootDir + "/..."}) {
+					errors, err := c.lintPackage(pkgname)
+					if err != nil {
+						errch <- err
+					}
+					errlist = append(errlist, errors...)
+				}
 			}
+		case len(args) == 1:
+			path := args[0]
+			if path == "%" {
+				path = file
+			}
+			switch {
+			case pathutil.IsDir(path):
+				errlist, err = c.lintDir(path)
+			case pathutil.IsExist(path):
+				errlist, err = c.lintFiles(path)
+			case !pathutil.IsDir(path) || !pathutil.IsExist(path):
+				for _, pkgname := range importPaths(args) {
+					errlist, err = c.lintPackage(pkgname)
+				}
+			}
+		case len(args) >= 2:
+			errlist, err = c.lintFiles(args...)
 		}
 
-	case len(args) >= 2:
-		errlist, err = c.lintFiles(args...)
-	}
+		if err != nil {
+			errch <- errors.WithStack(err)
+		}
+		errch <- errlist
+	}()
 
-	return errlist, errors.WithStack(err)
+	select {
+	case res := <-errch:
+		if res != nil {
+			return res
+		}
+		log.Debug("success")
+		return nvimutil.EchoSuccess(c.Nvim, "GoBuild", fmt.Sprintf("compiler: %s", c.ctx.Build.Tool))
+	case <-ctx.Done():
+		log.Debug("cancel")
+		<-errch
+		return nil
+	}
 }
 
 // TODO(zchee): Support list of go packages.

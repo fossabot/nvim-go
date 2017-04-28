@@ -5,6 +5,7 @@
 package autocmd
 
 import (
+	"context"
 	"path/filepath"
 
 	"nvim-go/config"
@@ -15,12 +16,15 @@ type bufWritePreEval struct {
 	File string
 }
 
-// BufWritePre run the commands on BufWritePre autocmd.
-func (a *Autocmd) BufWritePre(eval *bufWritePreEval) {
-	go a.bufWritePre(eval)
+func (a *Autocmd) bufWritePre(eval *bufWritePreEval) {
+	ctx, cancel := context.WithCancel(autocmdContext)
+	a.cmd.TryCancel("BufWritePre", cancel)
+	res := a.BufWritePre(ctx, eval)
+	a.cmd.HandleError("BufWritePre", res)
 }
 
-func (a *Autocmd) bufWritePre(eval *bufWritePreEval) {
+// BufWritePre run the commands on BufWritePre autocmd.
+func (a *Autocmd) BufWritePre(ctx context.Context, eval *bufWritePreEval) interface{} {
 	dir := filepath.Dir(eval.File)
 
 	// Iferr need execute before Fmt function because that function calls "noautocmd write"
@@ -28,13 +32,17 @@ func (a *Autocmd) bufWritePre(eval *bufWritePreEval) {
 	if config.IferrAutosave {
 		err := a.cmd.Iferr(eval.File)
 		if err != nil {
-			return
+			return err
 		}
 	}
 
 	if config.FmtAutosave {
-		go func() {
-			a.bufWritePreChan <- a.cmd.Fmt(dir)
-		}()
+		a.errs.Delete("Fmt")
+		res := a.cmd.Fmt(ctx, dir)
+		if res != nil {
+			return res
+		}
 	}
+
+	return nil
 }

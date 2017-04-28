@@ -5,10 +5,15 @@
 package command
 
 import (
+	"context"
+	"sync"
+
 	"nvim-go/ctx"
+	"nvim-go/nvimutil"
 
 	"github.com/neovim/go-client/nvim"
 	"github.com/neovim/go-client/nvim/plugin"
+	"github.com/pkg/errors"
 	"golang.org/x/sync/syncmap"
 )
 
@@ -16,22 +21,28 @@ import (
 type Command struct {
 	Nvim *nvim.Nvim
 
-	ctx *ctx.Context
-	errs *syncmap.Map
+	ctx     *ctx.Context
+	mu      sync.Mutex
+	cancels map[string]func()
+	errs    *syncmap.Map
 }
 
 // NewCommand return the new Command type with initialize some variables.
 func NewCommand(v *nvim.Nvim, ctx *ctx.Context) *Command {
 	return &Command{
-		Nvim: v,
-		ctx:  ctx,
-		errs: new(syncmap.Map),
+		Nvim:    v,
+		ctx:     ctx,
+		cancels: make(map[string]func()),
+		errs:    new(syncmap.Map),
 	}
 }
+
+var cmdContext context.Context
 
 // Register register nvim-go command or function to Neovim over the msgpack-rpc plugin interface.
 func Register(p *plugin.Plugin, ctx *ctx.Context) *Command {
 	c := NewCommand(p.Nvim, ctx)
+	cmdContext = context.Background()
 
 	// Register command and function
 	// CommandOptions order: Name, NArgs, Range, Count, Addr, Bang, Register, Eval, Bar, Complete
@@ -61,4 +72,33 @@ func Register(p *plugin.Plugin, ctx *ctx.Context) *Command {
 	p.HandleCommand(&plugin.CommandOptions{Name: "GoTabpages"}, c.cmdTabpagas)
 
 	return c
+}
+
+func (c *Command) TryCancel(cmd string, cancel func()) {
+	c.mu.Lock()
+	if c.cancels[cmd] != nil {
+		c.cancels[cmd]()
+		c.cancels[cmd] = nil
+	}
+	c.cancels[cmd] = cancel
+	c.mu.Unlock()
+}
+
+func (c *Command) HandleError(cmd string, res interface{}) error {
+	switch e := res.(type) {
+	case error:
+		nvimutil.ErrorWrap(c.Nvim, e)
+		return e
+	case []*nvim.QuickfixError:
+		c.errs.Store(cmd, e)
+		errlist := make(map[string][]*nvim.QuickfixError)
+		c.errs.Range(func(ki, vi interface{}) bool {
+			k, v := ki.(string), vi.([]*nvim.QuickfixError)
+			errlist[k] = append(errlist[k], v...)
+			return true
+		})
+		nvimutil.ErrorList(c.Nvim, errlist, true)
+		return errors.Errorf("errlist: %v", errlist)
+	}
+	return nil
 }

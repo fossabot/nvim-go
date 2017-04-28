@@ -6,10 +6,12 @@ package command
 
 import (
 	"bytes"
+	"context"
 	"go/scanner"
 	"time"
 
 	"nvim-go/config"
+	"nvim-go/internal/log"
 	"nvim-go/nvimutil"
 
 	"github.com/neovim/go-client/nvim"
@@ -25,26 +27,16 @@ var importsOptions = imports.Options{
 }
 
 func (c *Command) cmdFmt(dir string) {
-	delete(c.ctx.Errlist, "Fmt")
-	err := c.Fmt(dir)
+	ctx, cancel := context.WithCancel(cmdContext)
+	c.TryCancel("Fmt", cancel)
 
-	switch e := err.(type) {
-	case error:
-		nvimutil.ErrorWrap(c.Nvim, e)
-	case []*nvim.QuickfixError:
-		c.errs.Store("Fmt", e)
-		errlist := make(map[string][]*nvim.QuickfixError)
-		c.errs.Range(func(ki, vi interface{}) bool {
-			k, v := ki.(string), vi.([]*nvim.QuickfixError)
-			errlist[k] = append(errlist[k], v...)
-			return true
-		})
-		nvimutil.ErrorList(c.Nvim, errlist, true)
-	}
+	c.errs.Delete("Fmt")
+	res := c.Fmt(ctx, dir)
+	c.HandleError("Fmt", res)
 }
 
 // Fmt format to the current buffer source uses gofmt behavior.
-func (c *Command) Fmt(dir string) interface{} {
+func (c *Command) Fmt(ctx context.Context, dir string) interface{} {
 	defer nvimutil.Profile(time.Now(), "GoFmt")
 
 	b := nvim.Buffer(c.ctx.BufNr)
@@ -53,59 +45,75 @@ func (c *Command) Fmt(dir string) interface{} {
 		return errors.WithStack(err)
 	}
 
-	switch config.FmtMode {
-	case "fmt":
-		importsOptions.FormatOnly = true
-	case "goimports":
-		// nothing to do
-	default:
-		return errors.WithStack(errors.New("invalid value of go#fmt#mode option"))
-	}
-
-	buf, formatErr := imports.Process("", nvimutil.ToByteSlice(in), &importsOptions)
-	if formatErr != nil {
-		bufName, err := c.Nvim.BufferName(b)
-		if err != nil {
-			return errors.WithStack(err)
+	var out [][]byte
+	errch := make(chan interface{}, 1)
+	go func() {
+		switch config.FmtMode {
+		case "fmt":
+			importsOptions.FormatOnly = true
+		case "goimports":
+			// nothing to do
+		default:
+			errch <- errors.New("invalid value of go#fmt#mode option")
 		}
 
-		var errlist []*nvim.QuickfixError
-		if e, ok := formatErr.(scanner.Error); ok {
-			errlist = append(errlist, &nvim.QuickfixError{
-				FileName: bufName,
-				LNum:     e.Pos.Line,
-				Col:      e.Pos.Column,
-				Text:     e.Msg,
-			})
-		} else if el, ok := formatErr.(scanner.ErrorList); ok {
-			for _, e := range el {
+		buf, formatErr := imports.Process("", nvimutil.ToByteSlice(in), &importsOptions)
+		if formatErr != nil {
+			bufName, err := c.Nvim.BufferName(b)
+			if err != nil {
+				errch <- errors.WithStack(err)
+			}
+
+			var errlist []*nvim.QuickfixError
+			if e, ok := formatErr.(scanner.Error); ok {
 				errlist = append(errlist, &nvim.QuickfixError{
 					FileName: bufName,
 					LNum:     e.Pos.Line,
 					Col:      e.Pos.Column,
 					Text:     e.Msg,
 				})
+			} else if el, ok := formatErr.(scanner.ErrorList); ok {
+				for _, e := range el {
+					errlist = append(errlist, &nvim.QuickfixError{
+						FileName: bufName,
+						LNum:     e.Pos.Line,
+						Col:      e.Pos.Column,
+						Text:     e.Msg,
+					})
+				}
 			}
+			errch <- errlist
 		}
+		out = nvimutil.ToBufferLines(bytes.TrimSuffix(buf, []byte{'\n'}))
+		errch <- nil
+	}()
 
-		return errlist
+	select {
+	case res := <-errch:
+		if err, ok := res.(error); ok {
+			return errors.WithStack(err)
+		}
+		log.Debug("success")
+		if err := c.minUpdate(in, out); err != nil {
+			return errors.WithStack(err)
+		}
+		// TODO(zchee): When executed Fmt(itself) function at autocmd BufWritePre, vim "write"
+		// command will starting before the finish of the Fmt function because that function called
+		// asynchronously uses goroutine.
+		// However, "noautocmd" raises duplicate the filesystem events.
+		// In the case of macOS fsevents:
+		//  (FSE_STAT_CHANGED -> FSE_CHOWN -> FSE_CONTENT_MODIFIED) x2.
+		// It will affect the watchdog system such as inotify-tools, fswatch or fsevents-tools.
+		// We need to consider the alternative of BufWriteCmd or other an effective way.
+		return c.Nvim.Command("noautocmd write")
+	case <-ctx.Done():
+		log.Debug("cancel")
+		<-errch
+		return nil
 	}
-
-	out := nvimutil.ToBufferLines(bytes.TrimSuffix(buf, []byte{'\n'}))
-	minUpdate(c.Nvim, b, in, out)
-
-	// TODO(zchee): When executed Fmt(itself) function at autocmd BufWritePre, vim "write"
-	// command will starting before the finish of the Fmt function because that function called
-	// asynchronously uses goroutine.
-	// However, "noautocmd" raises duplicate the filesystem events.
-	// In the case of macOS fsevents:
-	//  (FSE_STAT_CHANGED -> FSE_CHOWN -> FSE_CONTENT_MODIFIED) x2.
-	// It will affect the watchdog system such as inotify-tools, fswatch or fsevents-tools.
-	// We need to consider the Alternative of BufWriteCmd or other an effective way.
-	return c.Nvim.Command("noautocmd write")
 }
 
-func minUpdate(v *nvim.Nvim, b nvim.Buffer, in [][]byte, out [][]byte) error {
+func (c *Command) minUpdate(in [][]byte, out [][]byte) error {
 	// Find matching head lines.
 	n := len(out)
 	if len(in) < len(out) {
@@ -135,7 +143,7 @@ func minUpdate(v *nvim.Nvim, b nvim.Buffer, in [][]byte, out [][]byte) error {
 	// Update the buffer.
 	start := head
 	end := len(in) - tail
-	repl := out[head : len(out)-tail]
+	replace := out[head : len(out)-tail]
 
-	return v.SetBufferLines(b, start, end, true, repl)
+	return c.Nvim.SetBufferLines(nvim.Buffer(c.ctx.BufNr), start, end, true, replace)
 }
