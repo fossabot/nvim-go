@@ -17,15 +17,9 @@ type bufWritePreEval struct {
 	File string `eval:"expand('%:p')"`
 }
 
-func (a *Autocmd) bufWritePre(eval *bufWritePreEval) {
-	go a.BufWritePre(eval)
-}
-
 // BufWritePre run the commands on BufWritePre autocmd.
 func (a *Autocmd) BufWritePre(eval *bufWritePreEval) {
 	defer nvimutil.Profile(a.ctx, time.Now(), "BufWritePre")
-
-	dir := filepath.Dir(eval.File)
 
 	// Iferr need execute before Fmt function because that function calls "noautocmd write"
 	// Also do not use goroutine.
@@ -38,7 +32,7 @@ func (a *Autocmd) BufWritePre(eval *bufWritePreEval) {
 
 	if config.FmtAutosave {
 		go func() {
-			a.bufWritePreChan <- a.cmd.Fmt(dir)
+			a.bufWritePreChan <- a.cmd.Fmt(filepath.Dir(eval.File))
 		}()
 	}
 }

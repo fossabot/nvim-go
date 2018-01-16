@@ -13,6 +13,7 @@ import (
 	"github.com/zchee/nvim-go/src/buildctx"
 	"github.com/zchee/nvim-go/src/command"
 	"github.com/zchee/nvim-go/src/logger"
+	"go.uber.org/zap"
 	"golang.org/x/sync/syncmap"
 )
 
@@ -20,6 +21,7 @@ import (
 type Autocmd struct {
 	ctx    context.Context
 	cancel context.CancelFunc
+	next   chan struct{}
 
 	Nvim         *nvim.Nvim
 	buildContext *buildctx.Context
@@ -41,6 +43,7 @@ func Register(pctx context.Context, p *plugin.Plugin, buildContext *buildctx.Con
 	autocmd := &Autocmd{
 		ctx:              ctx,
 		cancel:           cancel,
+		next:             make(chan struct{}, 1),
 		Nvim:             p.Nvim,
 		buildContext:     buildContext,
 		cmd:              cmd,
@@ -68,8 +71,21 @@ func Register(pctx context.Context, p *plugin.Plugin, buildContext *buildctx.Con
 	// p.HandleAutocmd(&plugin.AutocmdOptions{Event: "BufNewFile", Group: "nvim-go-autocmd", Pattern: "*.go"}, autocmd.BufReadPre)
 
 	// Handle the before the write to file.
-	p.HandleAutocmd(&plugin.AutocmdOptions{Event: "BufWritePre", Pattern: "*.go", Group: "nvim-go", Eval: "*"}, autocmd.bufWritePre)
+	p.HandleAutocmd(&plugin.AutocmdOptions{Event: "BufWritePre", Pattern: "*.go", Group: "nvim-go", Eval: "*"}, autocmd.BufWritePre)
 
 	// Handle the after the write to file.
 	p.HandleAutocmd(&plugin.AutocmdOptions{Event: "BufWritePost", Pattern: "*.go", Group: "nvim-go", Eval: "*"}, autocmd.bufWritePost)
+
+	go func() {
+		for {
+			select {
+			case <-autocmd.next:
+				if autocmd.cancel != nil {
+					autocmd.cancel()
+				}
+			case <-autocmd.ctx.Done():
+				logger.FromContext(autocmd.ctx).Warn("<-ctx.Done", zap.Error(autocmd.ctx.Err()))
+			}
+		}
+	}()
 }
